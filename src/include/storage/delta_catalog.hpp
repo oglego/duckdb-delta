@@ -50,6 +50,10 @@ public:
 	Value catalog_log_tail;
 	int64_t max_catalog_version = -1;
 
+	// Parquet writer options forwarded to the underlying Parquet COPY when writing Delta files
+	optional_idx row_group_size;
+	optional_idx row_group_size_bytes;
+
 public:
 	string GetInternalTableName() {
 		return internal_table_name;

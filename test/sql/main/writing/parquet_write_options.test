@@ -1,0 +1,75 @@
+# name: test/sql/main/writing/parquet_write_options.test
+# description: Test that the ROW_GROUP_SIZE / ROW_GROUP_SIZE_BYTES ATTACH options are forwarded to the Parquet writer
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# NOTE: row counts here are intentionally well above one vector (STANDARD_VECTOR_SIZE) so the insert is
+# guaranteed to arrive in more than one Sink() call. A flushed batch becomes exactly one Parquet row group,
+# and a batch is only flushed once it *crosses* ROW_GROUP_SIZE - a single small chunk would all land in one
+# row group regardless of the setting and wouldn't actually exercise the option.
+#
+# NOTE: ROW_GROUP_SIZE has a practical floor of DuckDB's vector size (2,048 rows) - values below that aren't
+# rejected, but since a flush only happens after a whole incoming chunk (up to 2,048 rows) has been appended,
+# a group can never come out smaller than one vector's worth regardless of what's configured. We use 2,048
+# here (rather than an arbitrary smaller number) to reflect that floor honestly.
+#
+# NOTE: ROW_GROUPS_PER_FILE / multi-file rotation is intentionally not covered here. PhysicalCopyToFile's
+# rotation path expects file_path to be a directory it generates numbered filenames inside, but the Delta
+# extension's non-partitioned write path currently sets file_path to a single fully-formed filename. Wiring
+# up rotation needs that file-naming path reworked first (see issue #298 follow-up) - it's out of scope here.
+
+# --- ROW_GROUP_SIZE: caps how many rows accumulate before a row group is flushed ---
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '{TEMP_DIR}/main/writing/parquet_write_options_rgs');
+
+statement ok
+ATTACH '{TEMP_DIR}/main/writing/parquet_write_options_rgs/delta_lake' AS t1 (TYPE delta, ROW_GROUP_SIZE 2048);
+
+statement ok
+INSERT INTO t1 SELECT * FROM range(5000) tbl(i);
+
+query II
+SELECT count(*), sum(i) FROM t1;
+----
+5010	12497545
+
+statement ok
+CREATE VIEW new_file_rgs AS
+SELECT * FROM glob('{TEMP_DIR}/main/writing/parquet_write_options_rgs/delta_lake/duckdb-*.parquet');
+
+# exactly one new file was written by the single (non-partitioned) INSERT
+query I
+SELECT count(*) FROM new_file_rgs;
+----
+1
+
+# with ROW_GROUP_SIZE 1000 and 5000 rows arriving across several vectors, that one file must contain
+# more than one row group (whereas without the option it would all land in a single row group - see baseline below)
+query I
+SELECT count(DISTINCT row_group_id) > 1
+FROM parquet_metadata('{TEMP_DIR}/main/writing/parquet_write_options_rgs/delta_lake/duckdb-*.parquet');
+----
+true
+
+# --- Regression: default behaviour (no options set) keeps everything in a single row group ---
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '{TEMP_DIR}/main/writing/parquet_write_options_default');
+
+statement ok
+ATTACH '{TEMP_DIR}/main/writing/parquet_write_options_default/delta_lake' AS t2 (TYPE delta);
+
+statement ok
+INSERT INTO t2 SELECT * FROM range(5000) tbl(i);
+
+query I
+SELECT count(DISTINCT row_group_id)
+FROM parquet_metadata('{TEMP_DIR}/main/writing/parquet_write_options_default/delta_lake/duckdb-*.parquet');
+----
+1

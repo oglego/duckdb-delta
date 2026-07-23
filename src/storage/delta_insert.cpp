@@ -403,6 +403,22 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	physical_copy_ref.expected_types = types_to_write;
 	physical_copy_ref.hive_file_pattern = true;
 
+	// Fine-grained control over row-group size/rotation, configured on the catalog (e.g. via ATTACH). These are
+	// generic, format-agnostic knobs on PhysicalCopyToFile itself -- NOT bind-time Parquet COPY options -- since
+	// DuckDB's Parquet writer bind no longer reads "row_group_size"/"row_groups_per_file" from CopyInfo::options.
+	if (row_group_size.IsValid()) {
+		physical_copy_ref.batch_size = row_group_size;
+	} else if (copy_fun->function.desired_batch_size) {
+		// Binder::BindCopyTo falls back to the copy function's own desired batch size (for Parquet this is
+		// DEFAULT_ROW_GROUP_SIZE, 122880) when the user hasn't set one explicitly. PlanInsert bypasses that
+		// binder entirely, so without this fallback batch_size is left unset here, which causes every incoming
+		// vector chunk to be flushed as its own row group instead of coalescing to a sensible default.
+		physical_copy_ref.batch_size = copy_fun->function.desired_batch_size(context, *physical_copy_ref.bind_data);
+	}
+	if (row_group_size_bytes.IsValid()) {
+		physical_copy_ref.batch_size_bytes = row_group_size_bytes;
+	}
+
 	insert.children.push_back(physical_copy);
 
 	return insert;
