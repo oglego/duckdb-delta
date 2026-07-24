@@ -1,0 +1,44 @@
+# name: test/sql/main/writing/default_row_group_size.test
+# description: Delta writes with no explicit Parquet options should coalesce to the Parquet writer's own
+#              default row group size (122880), the same way a plain `COPY tbl TO 'file.parquet' (FORMAT parquet)`
+#              would. Instead, DeltaCatalog::PlanInsert builds PhysicalCopyToFile by hand and skips the
+#              Binder::BindCopyTo fallback that normally resolves batch_size to desired_batch_size() when the
+#              user hasn't set one - so batch_size is left completely unset, and every incoming vector chunk
+#              (up to STANDARD_VECTOR_SIZE, 2048 rows) is flushed as its own row group instead.
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '{TEMP_DIR}/main/writing/default_row_group_size');
+
+statement ok
+ATTACH '{TEMP_DIR}/main/writing/default_row_group_size/delta_lake' AS t (TYPE delta);
+
+# 5000 rows arrive across multiple STANDARD_VECTOR_SIZE (2048-row) chunks. With a sane default row group
+# size (122880, as plain COPY would use), all of them should coalesce into a single row group.
+statement ok
+INSERT INTO t SELECT * FROM range(5000) tbl(i);
+
+statement ok
+CREATE VIEW new_file AS
+SELECT * FROM glob('{TEMP_DIR}/main/writing/default_row_group_size/delta_lake/duckdb-*.parquet');
+
+# sanity check: still exactly one physical file
+query I
+SELECT count(*) FROM new_file;
+----
+1
+
+# THE BUG: this should be 1 (one coalesced row group, matching Parquet's own 122880-row default), but on
+# unpatched main it comes back as 3 - one row group per incoming vector chunk (2048, 2048, 904) - because
+# batch_size is left unset instead of falling back to desired_batch_size().
+query I
+SELECT count(DISTINCT row_group_id)
+FROM parquet_metadata('{TEMP_DIR}/main/writing/default_row_group_size/delta_lake/duckdb-*.parquet');
+----
+1

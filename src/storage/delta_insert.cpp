@@ -403,6 +403,15 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	physical_copy_ref.expected_types = types_to_write;
 	physical_copy_ref.hive_file_pattern = true;
 
+	// Binder::BindCopyTo falls back to the copy function's own desired batch size (for Parquet this is
+	// DEFAULT_ROW_GROUP_SIZE, 122880) whenever the user hasn't set ROW_GROUP_SIZE explicitly in a COPY
+	// statement. PlanInsert builds PhysicalCopyToFile directly and bypasses that binder entirely, so without
+	// this fallback batch_size is left unset here -- which causes every incoming vector chunk to be flushed
+	// as its own row group instead of coalescing to a sensible default.
+	if (copy_fun->function.desired_batch_size) {
+		physical_copy_ref.batch_size = copy_fun->function.desired_batch_size(context, *physical_copy_ref.bind_data);
+	}
+
 	insert.children.push_back(physical_copy);
 
 	return insert;
