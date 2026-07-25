@@ -403,6 +403,11 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	physical_copy_ref.expected_types = types_to_write;
 	physical_copy_ref.hive_file_pattern = true;
 
+	// Set default batch size for PlanInsert paths that bypass Binder::BindCopyTo to prevent undersized row groups.
+	if (!physical_copy_ref.batch_size.IsValid() && copy_fun->function.desired_batch_size) {
+		physical_copy_ref.batch_size = copy_fun->function.desired_batch_size(context, *physical_copy_ref.bind_data);
+	}
+
 	insert.children.push_back(physical_copy);
 
 	return insert;

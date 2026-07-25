@@ -1,0 +1,36 @@
+# name: test/sql/main/writing/default_row_group_size.test
+# description: Verify Delta writes use Parquet's default row group size (122880) when unset.
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '{TEMP_DIR}/main/writing/default_row_group_size');
+
+statement ok
+ATTACH '{TEMP_DIR}/main/writing/default_row_group_size/delta_lake' AS t (TYPE delta);
+
+# All 5000 rows should coalesce into a single default row group.
+statement ok
+INSERT INTO t SELECT * FROM range(5000) tbl(i);
+
+statement ok
+CREATE VIEW new_file AS
+SELECT * FROM glob('{TEMP_DIR}/main/writing/default_row_group_size/delta_lake/duckdb-*.parquet');
+
+# Sanity check: single file created.
+query I
+SELECT count(*) FROM new_file;
+----
+1
+
+# Verify rows coalesced into 1 row group instead of flushing every 2048-row vector chunk separately.
+query I
+SELECT count(DISTINCT row_group_id)
+FROM parquet_metadata('{TEMP_DIR}/main/writing/default_row_group_size/delta_lake/duckdb-*.parquet');
+----
+1
